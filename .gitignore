@@ -1,0 +1,10 @@
+ai_data_cleaning_env/
+venv/
+
+__pycache__/
+*.pyc
+
+.env
+
+data/*.csv
+.DS_Store

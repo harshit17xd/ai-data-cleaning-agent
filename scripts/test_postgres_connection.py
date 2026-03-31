@@ -1,0 +1,62 @@
+import psycopg2
+
+# =========================
+# 🔹 DATABASE CONFIG
+# =========================
+DB_HOST = "localhost"
+DB_PORT = "5432"
+DB_NAME = "euron_ai_agent" 
+DB_USER = "postgres"
+DB_PASSWORD = "fresh@12345"     
+# =========================
+# 🔹 CONNECT + TEST
+# =========================
+try:
+    # Connect to PostgreSQL
+    connection = psycopg2.connect(
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        host=DB_HOST,
+        port=DB_PORT
+    )
+
+    cursor = connection.cursor()
+
+    print("✅ PostgreSQL Connection Successful!")
+
+    # =========================
+    # 🔹 FETCH TABLES
+    # =========================
+    cursor.execute("""
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_schema = 'public';
+    """)
+
+    tables = cursor.fetchall()
+
+    print("\n📊 Tables in the database:")
+    for table in tables:
+        print("👉", table[0])
+
+    # =========================
+    # 🔹 FETCH DATA FROM my_table
+    # =========================
+    cursor.execute("SELECT * FROM my_table;")
+    rows = cursor.fetchall()
+
+    print("\n📄 Data from my_table:")
+    for row in rows:
+        print(row)
+
+    # =========================
+    # 🔹 CLOSE CONNECTION
+    # =========================
+    cursor.close()
+    connection.close()
+
+    print("\n🔒 Connection Closed.")
+
+except Exception as e:
+    print(f"\n❌ Error connecting to PostgreSQL: {e}")
