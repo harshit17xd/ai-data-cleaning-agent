@@ -6,7 +6,7 @@ import aiohttp
 import json
 import numpy as np
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from sqlalchemy import create_engine
 from pydantic import BaseModel
 
@@ -26,44 +26,70 @@ ai_agent = AIAgent()
 cleaner = DataCleaning()
 
 
-def run_ai_cleaning(df: pd.DataFrame) -> pd.DataFrame:
+def run_ai_cleaning(df: pd.DataFrame, user_prompt: str = "") -> tuple:
     """
     Runs AI cleaning with robust fallback to rule-cleaned data.
+    Returns: (cleaned_df, ai_status_dict)
     """
+    ai_status = {
+        "ai_enabled": ai_agent.enabled,
+        "ai_applied": False,
+        "ai_message": "",
+        "llm_model": getattr(ai_agent, "model_name", "None"),
+        "llm_prompt": "",
+        "llm_response": "",
+        "llm_error": ""
+    }
+    
+    if not ai_agent.enabled:
+        ai_status["ai_message"] = "❌ AI disabled: No valid LLM key found (Groq/OpenAI)."
+        print(ai_status["ai_message"])
+        return df, ai_status
+    
     try:
-        ai_result = ai_agent.process_data(df)
+        print("\n" + "="*60)
+        print("🤖 STARTING AI CLEANING...")
+        print("="*60)
+        print(f"Input rows: {len(df)}")
+        print(f"Columns: {list(df.columns)}\n")
+        
+        ai_result = ai_agent.process_data(df, user_instructions=user_prompt)
+        # Attach latest LLM debug info (best-effort)
+        ai_status["llm_prompt"] = getattr(ai_agent, "last_prompt", "")
+        ai_status["llm_response"] = getattr(ai_agent, "last_response", "")
+        ai_status["llm_error"] = getattr(ai_agent, "last_error", "")
 
         if isinstance(ai_result, pd.DataFrame):
-            return ai_result
+            if not ai_result.empty:
+                ai_status["ai_applied"] = True
+                model_name = getattr(ai_agent, "model_name", "LLM")
+                ai_status["ai_message"] = f"✅ AI cleaning completed ({model_name}): {len(df)} → {len(ai_result)} rows"
+                print(f"\n{ai_status['ai_message']}")
+                return ai_result, ai_status
+            else:
+                ai_status["ai_message"] = "⚠️ AI returned empty result, using basic cleaning"
+                print(ai_status["ai_message"])
+                return df, ai_status
 
-        if isinstance(ai_result, str):
-            text = ai_result.strip()
-            try:
-                if text.startswith("[") or text.startswith("{"):
-                    parsed = json.loads(text)
-                    parsed_df = pd.DataFrame(parsed)
-                    if not parsed_df.empty:
-                        return parsed_df
-            except Exception:
-                pass
-
-            try:
-                parsed_df = pd.read_csv(io.StringIO(text))
-                if not parsed_df.empty:
-                    return parsed_df
-            except Exception:
-                pass
-
-        return df
-    except Exception:
-        return df
+        ai_status["ai_message"] = "⚠️ AI output format invalid, using original data"
+        return df, ai_status
+        
+    except Exception as e:
+        ai_status["ai_message"] = f"❌ AI cleaning error: {str(e)[:100]}"
+        print(f"\n{ai_status['ai_message']}")
+        print(f"Full error: {e}")
+        return df, ai_status
 
 
 def dataframe_to_json_records(df: pd.DataFrame):
     """
     Converts DataFrame into JSON-safe records (no NaN/Inf values).
     """
-    safe_df = df.replace([np.inf, -np.inf], np.nan).where(pd.notnull(df), None)
+    safe_df = df.copy()
+    safe_df = safe_df.replace([np.inf, -np.inf], np.nan)
+    # Normalize pandas missing values to None for JSON serialization
+    safe_df = safe_df.astype(object).where(pd.notnull(safe_df), None)
+    safe_df = safe_df.replace({pd.NA: None, np.nan: None})
     return safe_df.to_dict(orient="records")
 
 
@@ -84,29 +110,65 @@ async def health():
 # CSV / Excel Cleaning Endpoint
 # ==============================
 @app.post("/clean-data")
-async def clean_data(file: UploadFile = File(...)):
+async def clean_data(
+    file: UploadFile = File(...),
+    use_ai: bool = Form(False),
+    cleaning_prompt: str = Form("")
+):
     """
     Receives file from UI, cleans it using rule-based & AI methods, returns cleaned JSON.
     """
     try:
         contents = await file.read()
-        file_extension = file.filename.split(".")[-1]
+        file_extension = file.filename.split(".")[-1].lower()
 
         # Load file into DataFrame
         if file_extension == "csv":
-            df = pd.read_csv(io.StringIO(contents.decode("utf-8")))
+            try:
+                df = pd.read_csv(io.StringIO(contents.decode("utf-8")))
+            except UnicodeDecodeError:
+                df = pd.read_csv(io.StringIO(contents.decode("latin-1")))
         elif file_extension == "xlsx":
             df = pd.read_excel(io.BytesIO(contents))
         else:
             raise HTTPException(status_code=400, detail="Unsupported file format. Use CSV or Excel.")
 
+        input_rows = len(df)
+
         # Step 1: Rule-Based Cleaning
         df_cleaned = cleaner.clean_data(df)
 
-        # Step 2: AI Cleaning (with fallback)
-        df_ai_cleaned = run_ai_cleaning(df_cleaned)
+        # Step 2: Optional AI Cleaning
+        final_df = df_cleaned
+        ai_meta = {
+            "ai_enabled": False,
+            "ai_applied": False,
+            "ai_message": "Basic rule-based cleaning applied (AI not requested)"
+        }
+        
+        if use_ai:
+            df_ai_cleaned, ai_meta = run_ai_cleaning(df_cleaned, user_prompt=cleaning_prompt)
+            if isinstance(df_ai_cleaned, pd.DataFrame) and not df_ai_cleaned.empty:
+                final_df = df_ai_cleaned
 
-        return {"cleaned_data": dataframe_to_json_records(df_ai_cleaned)}
+        # Enforce strict validations so UI always shows cleaned output
+        final_df = cleaner.enforce_strict_rules(final_df)
+
+        return {
+            "status": "success",
+            "input_rows": input_rows,
+            "rows": int(len(final_df)),
+            "columns": [str(col) for col in final_df.columns],
+            "cleaned_data": dataframe_to_json_records(final_df),
+            "preview": dataframe_to_json_records(final_df.head(10)),
+            "ai_enabled": ai_meta["ai_enabled"],
+            "ai_applied": ai_meta["ai_applied"],
+            "ai_message": ai_meta["ai_message"],
+            "llm_model": ai_meta.get("llm_model", "None"),
+            "llm_prompt": ai_meta.get("llm_prompt", ""),
+            "llm_response": ai_meta.get("llm_response", ""),
+            "llm_error": ai_meta.get("llm_error", ""),
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
@@ -133,9 +195,15 @@ async def clean_db(query: DBQuery):
         df_cleaned = cleaner.clean_data(df)
 
         # AI cleaning (with fallback)
-        df_ai_cleaned = run_ai_cleaning(df_cleaned)
+        df_ai_cleaned, ai_meta = run_ai_cleaning(df_cleaned)
+        final_df = cleaner.enforce_strict_rules(df_ai_cleaned)
 
-        return {"cleaned_data": dataframe_to_json_records(df_ai_cleaned)}
+        return {
+            "cleaned_data": dataframe_to_json_records(final_df),
+            "ai_enabled": ai_meta["ai_enabled"],
+            "ai_applied": ai_meta["ai_applied"],
+            "ai_message": ai_meta["ai_message"],
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching data from database: {str(e)}")
@@ -168,9 +236,15 @@ async def clean_api(api_request: APIRequest):
         df_cleaned = cleaner.clean_data(df)
 
         # AI cleaning (with fallback)
-        df_ai_cleaned = run_ai_cleaning(df_cleaned)
+        df_ai_cleaned, ai_meta = run_ai_cleaning(df_cleaned)
+        final_df = cleaner.enforce_strict_rules(df_ai_cleaned)
 
-        return {"cleaned_data": dataframe_to_json_records(df_ai_cleaned)}
+        return {
+            "cleaned_data": dataframe_to_json_records(final_df),
+            "ai_enabled": ai_meta["ai_enabled"],
+            "ai_applied": ai_meta["ai_applied"],
+            "ai_message": ai_meta["ai_message"],
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing API data: {str(e)}")

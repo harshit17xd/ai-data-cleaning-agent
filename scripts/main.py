@@ -1,15 +1,20 @@
+import os
+from dotenv import load_dotenv
 from data_ingestions import DataIngestion
 from data_cleaning import DataCleaning
 from ai_agent import AIAgent
 
+# Load environment variables
+load_dotenv()
+
 # =========================
 # 🔹 DATABASE CONFIG
 # =========================
-DB_HOST = "localhost"
-DB_PORT = "5432"
-DB_NAME = "euron_ai_agent"
-DB_USER = "postgres"
-DB_PASSWORD = "fresh@12345"
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME", "euron_ai_agent")
+DB_USER = os.getenv("DB_USER", "postgres")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "fresh@12345")
 
 DB_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
